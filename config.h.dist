@@ -1,0 +1,15 @@
+const uint8_t SERVO_PIN = 5; // any PWD capable GPIO pin
+const uint8_t FINAL_POS_PIN = 4; // any input and intrerupt capable GPIO pin
+const uint8_t INITIAL_POS_PIN = 12; // any input and intrerupt capable GPIO pin
+const uint8_t LIGHT_PIN = 14; // any output PWM capable GPIO pin 
+const uint8_t BUZZER_PIN = 13; // any output PWM capable GPIO pin 
+// jam protection activates if the intended position was not reached in this interval 
+const uint16_t JAM_PROTECTION_TIME = 1000; // time before jam protection activates, in ms
+const char* DEVICE_NAME = "Dulciurilla"; // this is the hostname of the device inside the network
+// Your WiFi credentials.
+// Set password to "" for open networks.
+const char WIFI_SSID[] = "<your-ssid>";
+const char WIFI_PASS[] = "";
+const uint16_t WIFI_WAIT_DELAY = 5; // delay in the loop where we are checking if the WiFI is connected, in ms
+const uint32_t WIFI_CONNECTION_TIMEOUT = 30000; // ms
+const uint16_t BLINK_INTERVAL = 800; // interval for blinking LEDs in case of error, in ms
