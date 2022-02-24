@@ -1,9 +1,15 @@
+/**
+ * Board: NodeMCU 1.0
+*/
 #include <Servo.h>
 #include <ESP8266WiFi.h>
 #include <SimpleTimer.h> // https://github.com/jfturcot/SimpleTimer
 #include <ESP8266WebServer.h>
+#include <Bounce2.h> // https://github.com/thomasfredericks/Bounce2
 #include "soundFx.h"
 #include "config.h"
+
+#define BOUNCE_WITH_PROMPT_DETECTION
 
 enum TrayStatus {
   STOPPED,
@@ -17,7 +23,7 @@ enum DeviceStatus {
   DISPENSING,
   ERROR
 };
-displayHandler
+
 Servo myservo;  // create servo object to control a servo
 SimpleTimer timer;
 ESP8266WebServer server(80);
@@ -27,32 +33,20 @@ TrayStatus volatile trayStatus = STOPPED;
 DeviceStatus volatile deviceStatus = INITIALIZING;
 unsigned long lastOperationTime;
 char logBuffer[200];
+
+#ifndef PWMRANGE
+#define PWMRANGE 1023
+#endif
+
 uint16_t ledIntensity = PWMRANGE;
 int blinkTimerId; // made 0 when set
 
+// input relay is mechanical so we need to debounce it
+Bounce initialPosContact = Bounce();
+Bounce finalPosContact = Bounce();
+
 // -----------------------------------------------------------------
-/**
- * Main arduino setup function, executed at the begining
- */
-void setup()
-{
-  pinMode(LIGHT_PIN, OUTPUT);
-  analogWrite(LIGHT_PIN, ledIntensity);
 
-  pinMode(INITIAL_POS_PIN, INPUT_PULLUP);
-  pinMode(FINAL_POS_PIN, INPUT_PULLUP);
-  pinMode(BUZZER_PIN, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(INITIAL_POS_PIN), initialPosCallback, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(FINAL_POS_PIN), finalPosCallback, CHANGE);
-
-  initialPosReached = !digitalRead(INITIAL_POS_PIN);
-  finalPosReached = !digitalRead(FINAL_POS_PIN);
-
-  Serial.begin(9600);
-  wifiSetup();
-  webserverSetup();
-  deviceStatus = IDLE;
-}
 
 /**
  * Stop tray
@@ -67,9 +61,30 @@ void stopTray(bool isError = false)
   
   myservo.write(90);
   trayStatus = STOPPED;
-  deviceStatus = isError ? ERROR : (deviceStatus != DISPENSING ? IDLE : deviceStatus);
+  Serial.println("tray stopped");
+  deviceStatus = isError ? ERROR : (deviceStatus != DISPENSING ? IDLE : deviceStatus);  
+}
 
-  Serial.println("Tray stopped");
+/**
+ * Main arduino setup function, executed at the begining
+ */
+void setup()
+{
+  pinMode(LIGHT_PIN, OUTPUT);
+  analogWrite(LIGHT_PIN, ledIntensity);  
+  initialPosContact.attach(INITIAL_POS_PIN, INPUT_PULLUP);
+  finalPosContact.attach(FINAL_POS_PIN, INPUT_PULLUP);
+  initialPosContact.interval(1);
+  finalPosContact.interval(1);  
+  pinMode(BUZZER_PIN, OUTPUT);  
+
+  initialPosReached = !initialPosContact.read();
+  finalPosReached = !finalPosContact.read();
+
+  Serial.begin(115200);
+  wifiSetup();  
+  webserverSetup();
+  deviceStatus = IDLE;
 }
 
 /**
@@ -79,14 +94,29 @@ void stopTray(bool isError = false)
 void loop()
 {
   timer.run();
-  server.handleClient();    // Handling of incoming requests
-  // updating the position in the loop() helps to get a smooth operation
-  initialPosReached = !digitalRead(INITIAL_POS_PIN);
-  finalPosReached = !digitalRead(FINAL_POS_PIN);
+  if (deviceStatus == IDLE) {
+    server.handleClient();    // Handling of incoming requests  
+  }
 
-  if (trayStatus != STOPPED && millis() - lastOperationTime > JAM_PROTECTION_TIME) {
-    Serial.println("Jam protection activated !");
+  initialPosContact.update(); 
+  finalPosContact.update(); 
+  initialPosReached = !initialPosContact.read();
+  finalPosReached = !finalPosContact.read();
+    
+  if (initialPosReached && trayStatus == MOVING_BACKWARDS) {    
+    stopTray();    
+    Serial.println("Stopped becayse initial pos reached");
+  }
+  
+  if (finalPosReached && trayStatus == MOVING_FORWARD) {      
+    stopTray();
+    Serial.println("Stopped because final pos reached");
+  }
+    
+
+  if (trayStatus != STOPPED && millis() - lastOperationTime > JAM_PROTECTION_TIME) {    
     stopTray(true); // stop tray due to errors passing true as param
+    Serial.println("Jam protection activated !");
     systemError();
   }
   
@@ -97,7 +127,7 @@ void loop()
     if (command == 'b') {
       moveTrayBackwards();
     } else if (command == 'f') {
-      moveTrayForward();
+      moveTrayForward();      
     } else if (command == 'd') {
       dispense();
     }
@@ -114,6 +144,7 @@ void moveTrayForward()
   Serial.println("Received command to move tray forward.");
   //Serial.printf("FinalPosReached: %d, DeviceStatus: %d\n", finalPosReached, deviceStatus);
   if (finalPosReached || deviceStatus == ERROR) {
+    Serial.println("Skipping moveTrayForward command because already at final pos or error.");
     return;
   }
 
@@ -124,7 +155,7 @@ void moveTrayForward()
   trayStatus = MOVING_FORWARD;
   lastOperationTime = millis();
   Serial.println("Moving tray forward...");
-  myservo.write(83); // 0 .. 89
+  myservo.write(0); // 0 .. 60
 }
 
 /**
@@ -135,6 +166,7 @@ void moveTrayBackwards()
   Serial.println("Received command to move tray backwards.");
   //Serial.printf("initialPosReached: %d, DeviceStatus: %d\n", initialPosReached, deviceStatus);
   if (initialPosReached || deviceStatus == ERROR) {
+    Serial.println("Skipping moveTrayBackwards command because alraedty at initial pos or error.");
     return;
   };
 
@@ -144,44 +176,14 @@ void moveTrayBackwards()
   trayStatus = MOVING_BACKWARDS;
   lastOperationTime = millis();
   Serial.println("Moving tray backwards...");
-  myservo.write(120); // 91 .. 180
-}
-
-/**
- * Intrerupt when initial pos is reached
- * ICACHE_RAM_ATTR is needed for havint the ISR in RAM
- */
-ICACHE_RAM_ATTR void initialPosCallback()
-{
-  initialPosReached = !digitalRead(INITIAL_POS_PIN);
-  if (initialPosReached) {
-    finalPosReached = false;
-    if (trayStatus == MOVING_BACKWARDS) {
-      stopTray();
-    }
-  }
-}
-
-/**
- * Intrerupt when final pos is reached
- * ICACHE_RAM_ATTR is needed for havint the ISR in RAM
- */
-ICACHE_RAM_ATTR void finalPosCallback()
-{
-  finalPosReached = !digitalRead(FINAL_POS_PIN);
-  if (finalPosReached) {
-    initialPosReached = false;
-    if (trayStatus == MOVING_FORWARD) {
-      stopTray();
-    }
-  }
+  myservo.write(180); // 91 .. 180
 }
 
 /**
  * Connect to WiFI
  */
 void wifiSetup()
-{
+{  
   sprintf(logBuffer, "wifiSetup(): Connecting to %s", WIFI_SSID);
   Serial.println(logBuffer);
   WiFi.mode(WIFI_STA);
@@ -220,6 +222,7 @@ void wifiSetup()
   } else {
     Serial.println("wifiSetup(): Wifi connected. IP: " + WiFi.localIP().toString());
     WiFi.setAutoReconnect(true);
+    tone(BUZZER_PIN, NOTE_A5, 300);   
 
     while (ledIntensity < 1023) {
       analogWrite(LIGHT_PIN, ledIntensity++);
@@ -276,7 +279,17 @@ bool dispense()
   }
   
   Serial.println("Dispensing....");
+  
   deviceStatus = DISPENSING;
+  
+  tone(BUZZER_PIN, NOTE_C4, 500);    
+  delay(150);
+  tone(BUZZER_PIN, NOTE_E4, 500);
+  delay(150);
+  tone(BUZZER_PIN, NOTE_G4, 500);
+  delay(150);
+  tone(BUZZER_PIN, NOTE_C5, 500); 
+  
   moveTrayBackwards();
   // non-blocking delay
   if (deviceStatus != ERROR) {
@@ -418,4 +431,9 @@ void handleGetTrayStatus()
 void blinkLed()
 {
   digitalWrite(LIGHT_PIN, !digitalRead(LIGHT_PIN));
+  if (digitalRead(LIGHT_PIN)) {
+    tone(BUZZER_PIN, NOTE_C2);
+  } else {
+    noTone(BUZZER_PIN);
+  }  
 }
